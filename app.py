@@ -89,7 +89,7 @@ with tab2:
             with st.spinner("AI 正在過濾垃圾訊息並分析法規對策中，請稍候..."):
                 try:
                     genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    model = genai.GenerativeModel('gemini-3.5-flash')
                     
                     # 精準定義 5 大欄位的 Prompt
                     prompt = f"""
