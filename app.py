@@ -1,205 +1,208 @@
 import streamlit as st
 import pandas as pd
-import datetime
 import os
-import io
-import re
 import json
-from openai import OpenAI
+import datetime
+import google.generativeai as genai
 
-# --- 1. 系統初始化與設定 ---
+# 1. 系統網頁基本設定
+st.set_page_config(page_title="移工智慧實務智庫", layout="wide", initial_sidebar_state="expanded")
+st.title("💼 移工智慧實務智庫系統")
+
 DB_FILE = "database.csv"
+COLUMNS = ["ID", "日期", "主題", "相關法規", "實務解決方案", "仲介常見行話", "狀態"]
 
-def init_db():
-    if not os.path.exists(DB_FILE):
-        df = pd.DataFrame(columns=[
-            "id", "category", "keywords", "subject", "legal_basis", "description", "expiry_date", "source"
-        ])
-        df.to_csv(DB_FILE, index=False, encoding="utf-8-sig")
+# 初始化資料庫檔案
+if not os.path.exists(DB_FILE):
+    df_init = pd.DataFrame(columns=COLUMNS)
+    df_init.to_csv(DB_FILE, index=False)
 
-def load_data():
-    if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE)
-    return pd.DataFrame()
+# 讀取最新資料
+df = pd.read_csv(DB_FILE)
+df = df.astype(str).replace("nan", "")
 
-def save_data(df):
-    df.to_csv(DB_FILE, index=False, encoding="utf-8-sig")
+# 側邊欄：設定 AI 大腦金鑰
+st.sidebar.header("🔑 核心系統設定")
+api_key = st.sidebar.text_input("請輸入 Gemini API Key", type="password", help="請至 Google AI Studio 免費申請")
 
-init_db()
+# 主介面：三大分頁規劃
+tab1, tab2, tab3 = st.tabs(["🔍 智庫檢索與快速查閱", "🤖 AI 社群對話過濾解析", "🛠️ 智庫資料編修與備份"])
 
-# 頁面配置
-st.set_page_config(page_title="外籍移工智慧法令知識庫", layout="wide", initial_sidebar_state="collapsed")
+# ==========================================
+# Tab 1: 智庫檢索與快速查閱
+# ==========================================
+with tab1:
+    st.header("🔍 全局關鍵字智慧檢索")
+    search_query = st.text_input("請輸入關鍵字（例如：巴氏量表、洗工、廢聘...）", placeholder="點擊此處輸入...")
 
-# 自定義 CSS (大字體、高亮、警示燈)
-st.markdown("""
-    <style>
-    .main { background-color: #f0f2f6; }
-    .stTextInput input { font-size: 24px !important; padding: 20px !important; border-radius: 15px !important; }
-    .dashboard-card {
-        background-color: white; padding: 30px; border-radius: 20px; text-align: center;
-        box-shadow: 0 10px 25px rgba(0,0,0,0.05); cursor: pointer; transition: 0.3s; border: 1px solid #eee;
-    }
-    .dashboard-card:hover { transform: translateY(-5px); box-shadow: 0 15px 35px rgba(0,0,0,0.1); }
-    .card-icon { font-size: 50px; margin-bottom: 15px; }
-    .card-text { font-size: 20px; font-weight: bold; color: #333; }
-    
-    .search-result-card {
-        background-color: white; padding: 25px; border-radius: 15px; border-left: 10px solid #007bff;
-        margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-    }
-    .result-title { font-size: 26px; font-weight: bold; color: #1e3a8a; margin-bottom: 10px; }
-    .result-meta { font-size: 16px; color: #666; margin-bottom: 15px; }
-    .result-content { font-size: 20px; line-height: 1.6; color: #333; }
-    .highlight { background-color: #ffeb3b; padding: 2px 5px; border-radius: 5px; font-weight: bold; }
-    
-    .status-dot { height: 15px; width: 15px; border-radius: 50%; display: inline-block; margin-right: 10px; }
-    .dot-red { background-color: #ff4b4b; box-shadow: 0 0 10px #ff4b4b; }
-    .dot-yellow { background-color: #ffa500; box-shadow: 0 0 10px #ffa500; }
-    .alert-card { padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #eee; background: white; }
-    </style>
-""", unsafe_allow_html=True)
+    # 篩選有效資料（排除已被徹底刪除的，保留有效與過時標記）
+    display_df = df[df["狀態"] != "已刪除"]
 
-# --- 2. AI 解析模組 ---
-def process_line_chat(api_key, text_content):
-    client = OpenAI(api_key=api_key)
-    prompt = f"""
-    分析以下 LINE 聊天紀錄，過濾廢話，提取「法令與實務」知識。
-    請輸出 JSON 格式列表，每個項目包含：
-    category (法規動態/行話解密/實務個案/勞檢應對), keywords (核心關鍵字), 
-    subject (社群口語), legal_basis (正式法規依據), description (完整說明與實務對策)
-    
-    內容：
-    {text_content}
-    """
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={ "type": "json_object" }
-        )
-        res = json.loads(response.choices[0].message.content)
-        return res.get("data", res) if isinstance(res, dict) else res
-    except:
-        return []
-
-# --- 3. 頁面導航控制 ---
-if 'page' not in st.session_state:
-    st.session_state.page = 'home'
-
-def go_home(): st.session_state.page = 'home'
-def go_alert(): st.session_state.page = 'alert'
-def go_import(): st.session_state.page = 'import'
-def go_list(): st.session_state.page = 'list'
-
-# --- 4. 介面呈現 ---
-
-# 頂部導航 (僅在非首頁顯示)
-if st.session_state.page != 'home':
-    if st.button("⬅️ 返回首頁"): go_home()
-
-# 【首頁：大圖標儀表板】
-if st.session_state.page == 'home':
-    st.markdown("<h1 style='text-align: center; color: #1e3a8a; margin-bottom: 40px;'>外籍移工智慧法令知識庫</h1>", unsafe_allow_html=True)
-    
-    # 核心搜尋框
-    search_query = st.text_input("", placeholder="🔍 輸入關鍵字搜尋（如：巴氏、洗工、聘可...）")
-    
     if search_query:
-        # 執行搜尋邏輯
-        df = load_data()
-        results = df[df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)]
+        mask = display_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)
+        search_results = display_df[mask]
+    else:
+        search_results = display_df
+
+    st.write(f"📊 目前檢索到 {len(search_results)} 筆相關知識點")
+    st.write("---")
+
+    # 大卡片美化輸出
+    for _, row in search_results.iterrows():
+        # 根據狀態決定標題樣式
+        is_outdated = row["狀態"] == "過時標記"
+        title_suffix = " ⚠️ (此對話主題已被標記為：過時知識)" if is_outdated else ""
         
-        st.write(f"找到 {len(results)} 筆結果")
-        for _, row in results.iterrows():
-            def hl(text): return re.sub(f"({re.escape(search_query)})", r'<span class="highlight">\1</span>', str(text), flags=re.IGNORECASE)
-            st.markdown(f"""
-                <div class="search-result-card">
-                    <div class="result-title">{hl(row['subject'])}</div>
-                    <div class="result-meta"><b>分類：</b>{row['category']} | <b>關鍵字：</b>{hl(row['keywords'])} | <b>法規：</b>{row['legal_basis']}</div>
-                    <div class="result-content">{hl(row['description'])}</div>
-                </div>
-            """, unsafe_allow_html=True)
-        st.divider()
+        with st.container():
+            st.subheader(f"📌 主題：{row['主題']}{title_suffix}")
+            
+            c1, c2, c3 = st.columns([1, 1, 2])
+            c1.caption(f"📅 討論日期：{row['日期']}")
+            c2.caption(f"💬 狀態：{row['狀態']}")
+            if row['仲介常見行話']:
+                c3.warning(f"🏷️ 仲介行話解密：{row['仲介常見行話']}")
+            
+            st.info(f"📜 **相關法規依據：**\n{row['相關法規']}")
+            st.success(f"💡 **實務解決方案／對策：**\n{row['實務解決方案']}")
+            st.write("---")
 
-    # 大圖標按鈕區
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("🔥 雙軌到期警示面板", key="btn_alert", help="查看即時效期預警"): go_alert()
-        st.markdown('<div class="dashboard-card"><div class="card-icon">🚨</div><div class="card-text">雙軌到期警示</div></div>', unsafe_allow_html=True)
-    with col2:
-        if st.button("📥 LINE 紀錄自動匯入", key="btn_import"): go_import()
-        st.markdown('<div class="dashboard-card"><div class="card-icon">📲</div><div class="card-text">LINE 紀錄匯入</div></div>', unsafe_allow_html=True)
-    with col3:
-        if st.button("📖 完整知識庫瀏覽", key="btn_list"): go_list()
-        st.markdown('<div class="dashboard-card"><div class="card-icon">📚</div><div class="card-text">完整知識清單</div></div>', unsafe_allow_html=True)
+# ==========================================
+# Tab 2: AI 社群對話過濾解析 (Human-in-the-loop)
+# ==========================================
+with tab2:
+    st.header("🤖 LINE 社群對話大數據自動提煉")
+    st.write("將 LINE 社群導出的純文字紀錄貼在下方，AI 將自動過濾閒聊，提煉高價值法令實務。")
+    
+    # 3. 日期區段分析選項
+    col_d1, col_d2 = st.columns(2)
+    start_date = col_d1.date_input("請選擇分析【開始日期】", datetime.date(2026, 1, 1))
+    end_date = col_d2.date_input("請選擇分析【結束日期】", datetime.date(2026, 12, 31))
 
-# 【分頁：雙軌到期警示】
-elif st.session_state.page == 'alert':
-    st.title("🚨 雙軌到期警示面板")
-    df = load_data()
-    df['expiry_date'] = pd.to_datetime(df['expiry_date'], errors='coerce')
-    today = pd.Timestamp(datetime.date.today())
-    
-    red_alerts = df[df['expiry_date'] <= today + pd.Timedelta(days=60)]
-    yellow_alerts = df[(df['expiry_date'] > today + pd.Timedelta(days=60)) & (df['expiry_date'] <= today + pd.Timedelta(days=120))]
-    
-    col_r, col_y = st.columns(2)
-    with col_r:
-        st.subheader("🔴 紅色緊急燈 (60天內)")
-        for _, row in red_alerts.iterrows():
-            st.markdown(f'<div class="alert-card"><span class="status-dot dot-red"></span><b>{row["subject"]}</b><br>到期日：{row["expiry_date"].date()}</div>', unsafe_allow_html=True)
-    with col_y:
-        st.subheader("🟡 黃色預警燈 (60-120天)")
-        for _, row in yellow_alerts.iterrows():
-            st.markdown(f'<div class="alert-card"><span class="status-dot dot-yellow"></span><b>{row["subject"]}</b><br>到期日：{row["expiry_date"].date()}</div>', unsafe_allow_html=True)
+    raw_chat = st.text_area("📋 請在此處貼上 LINE 社群對話文字", height=250, placeholder="[LINE] 群組對話紀錄...")
 
-# 【分頁：LINE 紀錄自動匯入】
-elif st.session_state.page == 'import':
-    st.title("📥 LINE 紀錄自動匯入")
-    uploaded_file = st.file_uploader("上傳 LINE 聊天紀錄 (.txt)", type="txt")
-    api_key = st.text_input("輸入 AI API Key (OpenAI/Gemini)", type="password")
-    
-    if st.button("🚀 開始分析並匯入"):
-        if uploaded_file and api_key:
-            with st.spinner("AI 分析中..."):
-                content = uploaded_file.read().decode("utf-8")
-                new_data = process_line_chat(api_key, content[:10000])
-                if new_data:
-                    df = load_data()
-                    for item in new_data:
-                        item['id'] = len(df) + 1
-                        item['source'] = "LINE Import"
-                        item['expiry_date'] = (datetime.date.today() + datetime.timedelta(days=180)).isoformat()
-                        df = pd.concat([df, pd.DataFrame([item])], ignore_index=True)
-                    save_data(df)
-                    st.success(f"成功匯入 {len(new_data)} 筆資料！")
+    if st.button("🚀 開始進行智慧過濾分析"):
+        if not api_key:
+            st.error("❌ 請先在左側邊欄填入您的 Gemini API Key 才能啟動 AI 功能！")
+        elif not raw_chat.strip():
+            st.error("❌ 請輸入對話內容！")
         else:
-            st.warning("請提供檔案與 API Key")
+            with st.spinner("AI 正在過濾垃圾訊息並分析法規對策中，請稍候..."):
+                try:
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    
+                    # 精準定義 5 大欄位的 Prompt
+                    prompt = f"""
+                    你是一位精通台灣外籍移工引進法規、就業服務法與仲介實務對應的專家。
+                    請分析以下 LINE 社群對話，並且「只擷取」發生在 {start_date} 到 {end_date} 之間的有效討論資訊。
+                    
+                    請嚴格過濾無意義的打招呼、貼圖、閒聊、以及與移工法令/實務無關的對話。
+                    請將留下來的精華主題，精準整理成一個 JSON 陣列，格式必須嚴格符合以下欄位名稱，不要自創欄位：
+                    [
+                      {{
+                        "日期": "對話發生的真實日期，格式統一為 YYYY/MM/DD",
+                        "主題": "這段討論的核心業務主旨",
+                        "相關法規": "涉及的條文法規、就業服務法條號、或勞動部最新函釋（若完全無提及法規，請寫：實務操作慣例）",
+                        "實務解決方案": "針對此對話內提出的疑問，老手仲介或法令給出的具體操作建議與解決實務對策",
+                        "仲介常見行話": "解密對話中出現的術語（例如：洗工、廢聘、巴氏、3年期滿，若無則留空）"
+                      }}
+                    ]
+                    
+                    對話紀錄如下：
+                    {raw_chat}
+                    
+                    請直接輸出 JSON 陣列，絕對不要包含任何 markdown 標籤（如 ```json）或任何前言與結尾解釋。
+                    """
+                    response = model.generate_content(prompt)
+                    clean_json = response.text.strip()
+                    
+                    # 存入 Session state 供人工確認機制使用
+                    st.session_state["parsed_data"] = json.loads(clean_json)
+                    st.success("✨ AI 分析完畢！請在下方進行【人工審查確認】。")
+                except Exception as e:
+                    st.error(f"分析失敗，錯誤訊息：{e}")
 
-# 【分頁：完整知識庫瀏覽】
-elif st.session_state.page == 'list':
-    st.title("📖 完整知識庫清單")
-    df = load_data()
+    # 1. 人工確認機制 (Human-in-the-loop)
+    if "parsed_data" in st.session_state and st.session_state["parsed_data"]:
+        st.write("---")
+        st.subheader("👀 人工審查確認面板 (Human-in-the-loop)")
+        st.write("以下為 AI 幫您初步提煉的結構化資訊，請確認或修改後再正式寫入您的智庫：")
+        
+        verified_list = []
+        for i, item in enumerate(st.session_state["parsed_data"]):
+            with st.expander(f"待確認知識點 #{i+1}：{item.get('主題', '未命名主題')}", expanded=True):
+                v_date = st.text_input(f"日期 #{i+1}", item.get("日期", ""), key=f"d_{i}")
+                v_topic = st.text_input(f"主題 #{i+1}", item.get("主題", ""), key=f"t_{i}")
+                v_law = st.text_area(f"相關法規依據 #{i+1}", item.get("相關法規", ""), key=f"l_{i}")
+                v_sol = st.text_area(f"實務解決方案/對策 #{i+1}", item.get("實務解決方案", ""), key=f"s_{i}")
+                v_jargon = st.text_input(f"仲介常見行話解密 #{i+1}", item.get("仲介常見行話", ""), key=f"j_{i}")
+                
+                verified_list.append({
+                    "ID": str(int(datetime.datetime.now().timestamp()) + i),
+                    "日期": v_date,
+                    "主題": v_topic,
+                    "相關法規": v_law,
+                    "實務解決方案": v_sol,
+                    "仲介常見行話": v_jargon,
+                    "狀態": "有效"
+                })
+        
+        if st.button("💾 檢查無誤，正式寫入智慧智庫資料庫"):
+            new_df = pd.DataFrame(verified_list)
+            df = pd.concat([df, new_df], ignore_index=True)
+            df.to_csv(DB_FILE, index=False)
+            st.session_state["parsed_data"] = None
+            st.success("🎉 資料已成功寫入智庫！請前往【智庫檢索】分頁查閱。")
+            st.rerun()
+
+# ==========================================
+# Tab 3: 智庫資料編修與備份 (手動編修、過時與刪除)
+# ==========================================
+with tab3:
+    st.header("🛠️ 智庫資料維護與手動編修後台")
     
-    # 匯出按鈕
-    csv = df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 下載最新 CSV 資料庫", data=csv, file_name="knowledge_base.csv", mime="text/csv")
-    
-    st.dataframe(df, use_container_width=True)
-    
-    with st.expander("➕ 手動新增資料"):
-        with st.form("add_form"):
-            c1, c2 = st.columns(2)
-            cat = c1.selectbox("分類", ["法規動態", "行話解密", "實務個案", "勞檢應對"])
-            sub = c2.text_input("主題")
-            kw = st.text_input("關鍵字")
-            legal = st.text_input("法規依據")
-            desc = st.text_area("詳細說明")
-            exp = st.date_input("提醒到期日", value=datetime.date.today() + datetime.timedelta(days=365))
-            if st.form_submit_button("儲存"):
-                new_row = {"id": len(df)+1, "category": cat, "keywords": kw, "subject": sub, 
-                           "legal_basis": legal, "description": desc, "expiry_date": exp.isoformat(), "source": "Manual"}
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                save_data(df)
-                st.success("已儲存！")
+    # 3 & 4. 手動編修、標記過時、刪除功能
+    if df.empty or len(df[df["狀態"] != "已刪除"]) == 0:
+        st.info("目前資料庫內尚無有效數據可供編修。")
+    else:
+        active_df = df[df["狀態"] != "已刪除"]
+        edit_target = st.selectbox("🎯 請選取您想要編輯或處置的知識點主題：", active_df["主題"].unique())
+        
+        target_row = active_df[active_df["主題"] == edit_target].iloc[0]
+        target_idx = df[df["主題"] == edit_target].index[0]
+        
+        with st.form("manual_edit_form"):
+            st.write(f"📝 正在編輯知識點 ID: {target_row['ID']}")
+            ed_date = st.text_input("✍️ 修改日期", target_row["日期"])
+            ed_topic = st.text_input("✍️ 修改主題名稱", target_row["主題"])
+            ed_law = st.text_area("✍️ 修改相關法規", target_row["相關法規"])
+            ed_sol = st.text_area("✍️ 修改實務解決方案", target_row["實務解決方案"])
+            ed_jargon = st.text_input("✍️ 修改仲介常見行話", target_row["仲介常見行話"])
+            ed_status = st.selectbox("🚨 變更知識有效狀態", ["有效", "過時標記", "已刪除"], 
+                                     index=["有效", "過時標記", "已刪除"].index(target_row["狀態"]))
+            
+            btn_save = st.form_submit_button("💾 儲存修改內容")
+            
+            if btn_save:
+                df.at[target_idx, "日期"] = ed_date
+                df.at[target_idx, "主題"] = ed_topic
+                df.at[target_idx, "相關法規"] = ed_law
+                df.at[target_idx, "實務解決方案"] = ed_sol
+                df.at[target_idx, "仲介常見行話"] = ed_jargon
+                df.at[target_idx, "狀態"] = ed_status
+                df.to_csv(DB_FILE, index=False)
+                st.success("✅ 智庫數據已手動編修完成！系統已同步重啟更新。")
                 st.rerun()
+
+    st.write("---")
+    st.subheader("📥 2. 智庫核心數據安全備份區")
+    st.write("由於免費雲端主機重啟時會清空暫存資料，建議您每次大量新增或修改智庫後，點擊下方按鈕將大資料庫下載回電腦備份。")
+    
+    # 輸出成 CSV 下載按鈕
+    csv_buffer = df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 下載最新智慧智庫備份檔 (database.csv)",
+        data=csv_buffer,
+        file_name="migrant_worker_backup.csv",
+        mime="text/csv"
+    )
