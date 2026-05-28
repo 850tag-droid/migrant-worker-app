@@ -38,8 +38,15 @@ with tab1:
     # 篩選有效資料（排除已被徹底刪除的，保留有效與過時標記）
     display_df = df[df["狀態"] != "已刪除"]
 
-    if search_query:
-        mask = display_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False).any(), axis=1)
+if search_query:
+        # 將輸入的字串用「空白」自動切開成多個關鍵字 (例如：['越南', '聘僱'])
+        keywords = search_query.split()
+        
+        # 核心優化：檢查每一筆資料，必須「同時包含」你打的所有關鍵字
+        mask = display_df.apply(
+            lambda row: all(kw.lower() in " ".join(row.astype(str)).lower() for kw in keywords), 
+            axis=1
+        )
         search_results = display_df[mask]
     else:
         search_results = display_df
