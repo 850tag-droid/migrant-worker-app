@@ -38,7 +38,7 @@ with tab1:
     # 篩選有效資料（排除已被徹底刪除的，保留有效與過時標記）
     display_df = df[df["狀態"] != "已刪除"]
 
-if search_query:
+    if search_query:
         # 將輸入的字串用「空白」自動切開成多個關鍵字 (例如：['越南', '聘僱'])
         keywords = search_query.split()
         
@@ -72,7 +72,6 @@ if search_query:
             st.info(f"📜 **相關法規依據：**\n{row['相關法規']}")
             st.success(f"💡 **實務解決方案／對策：**\n{row['實務解決方案']}")
             st.write("---")
-
 # ==========================================
 # Tab 2: AI 社群對話過濾解析 (Human-in-the-loop)
 # ==========================================
