@@ -1,214 +1,247 @@
 import streamlit as st
 import pandas as pd
-import os
 import json
 import datetime
+import io
 import google.generativeai as genai
+import gspread
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
-# 1. 系統網頁基本設定
-st.set_page_config(page_title="移工智慧實務智庫", layout="wide", initial_sidebar_state="expanded")
-st.title("💼 移工智慧實務智庫系統")
+# 1. 網頁基本設定
+st.set_page_config(page_title="人力仲介知識系統", layout="wide", initial_sidebar_state="expanded")
 
-DB_FILE = "database.csv"
-COLUMNS = ["ID", "日期", "主題", "相關法規", "實務解決方案", "仲介常見行話", "狀態"]
+# 2. 安全驗證：從雲端保險箱讀取密碼與設定
+try:
+    ADMIN_PWD = st.secrets["ADMIN_PASSWORD"]
+    USER_PWD = st.secrets["USER_PASSWORD"]
+    GEMINI_KEY = st.secrets["GEMINI_API_KEY"]
+    DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+    GOOGLE_JSON_DICT = json.loads(st.secrets["GOOGLE_JSON"])
+except Exception as e:
+    st.error("❌ 系統保險箱 (Secrets) 設定不完整，請檢查 Streamlit 後台設定！")
+    st.stop()
 
-# 初始化資料庫檔案
-if not os.path.exists(DB_FILE):
-    df_init = pd.DataFrame(columns=COLUMNS)
-    df_init.to_csv(DB_FILE, index=False)
+# 3. 初始化登入狀態
+if "login_status" not in st.session_state:
+    st.session_state["login_status"] = False
+    st.session_state["user_role"] = None
 
-# 讀取最新資料
-df = pd.read_csv(DB_FILE)
-df = df.astype(str).replace("nan", "")
+# ---- 🔍 登入攔截畫面 ----
+if not st.session_state["login_status"]:
+    st.title("🔐 人力仲介知識系統 - 安全登入")
+    with st.form("login_form"):
+        username = st.text_input("請輸入帳號", placeholder="admin 或 user")
+        password = st.text_input("請輸入密碼", type="password")
+        btn_login = st.form_submit_button("確認登入")
+        
+        if btn_login:
+            if username == "admin" and password == ADMIN_PWD:
+                st.session_state["login_status"] = True
+                st.session_state["user_role"] = "管理員"
+                st.rerun()
+            elif username == "user" and password == USER_PWD:
+                st.session_state["login_status"] = True
+                st.session_state["user_role"] = "一般使用者"
+                st.rerun()
+            else:
+                st.error("❌ 帳號或密碼錯誤，請重新輸入！")
+    st.stop()
 
-# 側邊欄：設定 AI 大腦金鑰
-st.sidebar.header("🔑 核心系統設定")
-api_key = st.sidebar.text_input("請輸入 Gemini API Key", type="password", help="請至 Google AI Studio 免費申請")
+# ---- 🔓 核心系統區 (已登入) ----
 
-# 主介面：三大分頁規劃
-tab1, tab2, tab3 = st.tabs(["🔍 智庫檢索與快速查閱", "🤖 AI 社群對話過濾解析", "🛠️ 智庫資料編修與備份"])
+# 4. 連線 Google 雙棲服務 (Sheets & Drive)
+@st.cache_resource(ttl=60)
+def connect_google_services():
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.file"]
+    creds = Credentials.from_service_account_info(GOOGLE_JSON_DICT, scopes=scopes)
+    
+    # 試算表連線
+    client_sheets = gspread.authorize(creds)
+    sheet_url = "https://docs.google.com/spreadsheets/d/16DGq7ZllxGDYuP57b9jQDX72srm_KVaIYTkc1cVEGXs/edit" 
+    wks = client_sheets.open_by_url(sheet_url).sheet1
+    
+    # 雲端硬碟連線
+    service_drive = build('drive', 'v3', credentials=creds)
+    return wks, service_drive
+
+try:
+    wks, drive_service = connect_google_services()
+    records = wks.get_all_records()
+    df = pd.DataFrame(records) if records else pd.DataFrame(columns=["ID", "日期", "主題", "相關法規", "實務解決方案", "仲介常見行話", "狀態", "附件連結"])
+    df = df.astype(str).replace("nan", "")
+except Exception as e:
+    st.error(f"❌ 無法連線至 Google 服務，請確認共用設定！錯誤原因: {e}")
+    st.stop()
+
+# 頂部狀態列
+c_title, c_logout = st.columns([9, 1])
+c_title.title(f"💼 人力仲介知識系統 ({st.session_state['user_role']}模式)")
+if c_logout.button("🚪 登出系統"):
+    st.session_state["login_status"] = False
+    st.session_state["user_role"] = None
+    st.rerun()
+
+# 權限分流顯示分頁
+if st.session_state["user_role"] == "管理員":
+    tab1, tab2, tab3 = st.tabs(["🔍 智庫檢索與快速查閱", "🤖 AI 對話智慧解析", "🛠️ 智庫維護與附件上傳"])
+else:
+    tab1 = st.tabs(["🔍 智庫檢索與快速查閱"])[0]
+    tab2, tab3 = None, None
 
 # ==========================================
-# Tab 1: 智庫檢索與快速查閱
+# Tab 1: 智庫檢索與快速查閱 (所有人)
 # ==========================================
 with tab1:
     st.header("🔍 全局關鍵字智慧檢索")
-    search_query = st.text_input("請輸入關鍵字（例如：巴氏量表、洗工、廢聘...）", placeholder="點擊此處輸入...")
+    search_query = st.text_input("請輸入關鍵字（多關鍵字請用「空白」隔開）", placeholder="例如：越南 駕照")
+    display_df = df[df["狀態"] != "已刪除"] if not df.empty else df
 
-    # 篩選有效資料（排除已被徹底刪除的，保留有效與過時標記）
-    display_df = df[df["狀態"] != "已刪除"]
-
-    if search_query:
-        # 將輸入的字串用「空白」自動切開成多個關鍵字 (例如：['越南', '聘僱'])
+    if search_query and not display_df.empty:
         keywords = search_query.split()
-        
-        # 核心優化：檢查每一筆資料，必須「同時包含」你打的所有關鍵字
-        mask = display_df.apply(
-            lambda row: all(kw.lower() in " ".join(row.astype(str)).lower() for kw in keywords), 
-            axis=1
-        )
+        mask = display_df.apply(lambda row: all(kw.lower() in " ".join(row.astype(str)).lower() for kw in keywords), axis=1)
         search_results = display_df[mask]
     else:
         search_results = display_df
 
-    st.write(f"📊 目前檢索到 {len(search_results)} 筆相關知識點")
+    st.write(f"📊 檢索到 {len(search_results)} 筆結果")
     st.write("---")
 
-    # 大卡片美化輸出
     for _, row in search_results.iterrows():
-        # 根據狀態決定標題樣式
         is_outdated = row["狀態"] == "過時標記"
-        title_suffix = " ⚠️ (此對話主題已被標記為：過時知識)" if is_outdated else ""
+        title_suffix = " ⚠️ (過時知識)" if is_outdated else ""
         
         with st.container():
-            st.subheader(f"📌 主題：{row['主題']}{title_suffix}")
-            
+            st.subheader(f"📌 {row['主題']}{title_suffix}")
             c1, c2, c3 = st.columns([1, 1, 2])
-            c1.caption(f"📅 討論日期：{row['日期']}")
+            c1.caption(f"📅 日期：{row['日期']}")
             c2.caption(f"💬 狀態：{row['狀態']}")
-            if row['仲介常見行話']:
-                c3.warning(f"🏷️ 仲介行話解密：{row['仲介常見行話']}")
+            if row.get('仲介常見行話'):
+                c3.warning(f"🏷️ 行話：{row['仲介常見行話']}")
             
-            st.info(f"📜 **相關法規依據：**\n{row['相關法規']}")
-            st.success(f"💡 **實務解決方案／對策：**\n{row['實務解決方案']}")
+            st.info(f"📜 **相關法規：**\n{row['相關法規']}")
+            st.success(f"💡 **實務解決方案：**\n{row['實務解決方案']}")
+            
+            # 若有附件則顯示下載按鈕
+            if row.get('附件連結') and str(row['附件連結']).startswith('http'):
+                st.markdown(f"**📎 [點擊檢視 / 下載雲端附件]({row['附件連結']})**")
             st.write("---")
-# ==========================================
-# Tab 2: AI 社群對話過濾解析 (Human-in-the-loop)
-# ==========================================
-with tab2:
-    st.header("🤖 LINE 社群對話大數據自動提煉")
-    st.write("將 LINE 社群導出的純文字紀錄貼在下方，AI 將自動過濾閒聊，提煉高價值法令實務。")
-    
-    # 3. 日期區段分析選項
-    col_d1, col_d2 = st.columns(2)
-    start_date = col_d1.date_input("請選擇分析【開始日期】", datetime.date(2026, 1, 1))
-    end_date = col_d2.date_input("請選擇分析【結束日期】", datetime.date(2026, 12, 31))
-
-    raw_chat = st.text_area("📋 請在此處貼上 LINE 社群對話文字", height=250, placeholder="[LINE] 群組對話紀錄...")
-
-    if st.button("🚀 開始進行智慧過濾分析"):
-        if not api_key:
-            st.error("❌ 請先在左側邊欄填入您的 Gemini API Key 才能啟動 AI 功能！")
-        elif not raw_chat.strip():
-            st.error("❌ 請輸入對話內容！")
-        else:
-            with st.spinner("AI 正在過濾垃圾訊息並分析法規對策中，請稍候..."):
-                try:
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-3.5-flash')
-                    
-                    # 精準定義 5 大欄位的 Prompt
-                    prompt = f"""
-                    你是一位精通台灣外籍移工引進法規、就業服務法與仲介實務對應的專家。
-                    請分析以下 LINE 社群對話，並且「只擷取」發生在 {start_date} 到 {end_date} 之間的有效討論資訊。
-                    
-                    請嚴格過濾無意義的打招呼、貼圖、閒聊、以及與移工法令/實務無關的對話。
-                    請將留下來的精華主題，精準整理成一個 JSON 陣列，格式必須嚴格符合以下欄位名稱，不要自創欄位：
-                    [
-                      {{
-                        "日期": "對話發生的真實日期，格式統一為 YYYY/MM/DD",
-                        "主題": "這段討論的核心業務主旨",
-                        "相關法規": "涉及的條文法規、就業服務法條號、或勞動部最新函釋（若完全無提及法規，請寫：實務操作慣例）",
-                        "實務解決方案": "針對此對話內提出的疑問，老手仲介或法令給出的具體操作建議與解決實務對策",
-                        "仲介常見行話": "解密對話中出現的術語（例如：洗工、廢聘、巴氏、3年期滿，若無則留空）"
-                      }}
-                    ]
-                    
-                    對話紀錄如下：
-                    {raw_chat}
-                    
-                    請直接輸出 JSON 陣列，絕對不要包含任何 markdown 標籤（如 ```json）或任何前言與結尾解釋。
-                    """
-                    response = model.generate_content(prompt)
-                    clean_json = response.text.strip()
-                    
-                    # 存入 Session state 供人工確認機制使用
-                    st.session_state["parsed_data"] = json.loads(clean_json)
-                    st.success("✨ AI 分析完畢！請在下方進行【人工審查確認】。")
-                except Exception as e:
-                    st.error(f"分析失敗，錯誤訊息：{e}")
-
-    # 1. 人工確認機制 (Human-in-the-loop)
-    if "parsed_data" in st.session_state and st.session_state["parsed_data"]:
-        st.write("---")
-        st.subheader("👀 人工審查確認面板 (Human-in-the-loop)")
-        st.write("以下為 AI 幫您初步提煉的結構化資訊，請確認或修改後再正式寫入您的智庫：")
-        
-        verified_list = []
-        for i, item in enumerate(st.session_state["parsed_data"]):
-            with st.expander(f"待確認知識點 #{i+1}：{item.get('主題', '未命名主題')}", expanded=True):
-                v_date = st.text_input(f"日期 #{i+1}", item.get("日期", ""), key=f"d_{i}")
-                v_topic = st.text_input(f"主題 #{i+1}", item.get("主題", ""), key=f"t_{i}")
-                v_law = st.text_area(f"相關法規依據 #{i+1}", item.get("相關法規", ""), key=f"l_{i}")
-                v_sol = st.text_area(f"實務解決方案/對策 #{i+1}", item.get("實務解決方案", ""), key=f"s_{i}")
-                v_jargon = st.text_input(f"仲介常見行話解密 #{i+1}", item.get("仲介常見行話", ""), key=f"j_{i}")
-                
-                verified_list.append({
-                    "ID": str(int(datetime.datetime.now().timestamp()) + i),
-                    "日期": v_date,
-                    "主題": v_topic,
-                    "相關法規": v_law,
-                    "實務解決方案": v_sol,
-                    "仲介常見行話": v_jargon,
-                    "狀態": "有效"
-                })
-        
-        if st.button("💾 檢查無誤，正式寫入智慧智庫資料庫"):
-            new_df = pd.DataFrame(verified_list)
-            df = pd.concat([df, new_df], ignore_index=True)
-            df.to_csv(DB_FILE, index=False)
-            st.session_state["parsed_data"] = None
-            st.success("🎉 資料已成功寫入智庫！請前往【智庫檢索】分頁查閱。")
-            st.rerun()
 
 # ==========================================
-# Tab 3: 智庫資料編修與備份 (手動編修、過時與刪除)
+# Tab 2: AI 對話智慧解析 (僅管理員)
 # ==========================================
-with tab3:
-    st.header("🛠️ 智庫資料維護與手動編修後台")
-    
-    # 3 & 4. 手動編修、標記過時、刪除功能
-    if df.empty or len(df[df["狀態"] != "已刪除"]) == 0:
-        st.info("目前資料庫內尚無有效數據可供編修。")
-    else:
-        active_df = df[df["狀態"] != "已刪除"]
-        edit_target = st.selectbox("🎯 請選取您想要編輯或處置的知識點主題：", active_df["主題"].unique())
-        
-        target_row = active_df[active_df["主題"] == edit_target].iloc[0]
-        target_idx = df[df["主題"] == edit_target].index[0]
-        
-        with st.form("manual_edit_form"):
-            st.write(f"📝 正在編輯知識點 ID: {target_row['ID']}")
-            ed_date = st.text_input("✍️ 修改日期", target_row["日期"])
-            ed_topic = st.text_input("✍️ 修改主題名稱", target_row["主題"])
-            ed_law = st.text_area("✍️ 修改相關法規", target_row["相關法規"])
-            ed_sol = st.text_area("✍️ 修改實務解決方案", target_row["實務解決方案"])
-            ed_jargon = st.text_input("✍️ 修改仲介常見行話", target_row["仲介常見行話"])
-            ed_status = st.selectbox("🚨 變更知識有效狀態", ["有效", "過時標記", "已刪除"], 
-                                     index=["有效", "過時標記", "已刪除"].index(target_row["狀態"]))
-            
-            btn_save = st.form_submit_button("💾 儲存修改內容")
-            
-            if btn_save:
-                df.at[target_idx, "日期"] = ed_date
-                df.at[target_idx, "主題"] = ed_topic
-                df.at[target_idx, "相關法規"] = ed_law
-                df.at[target_idx, "實務解決方案"] = ed_sol
-                df.at[target_idx, "仲介常見行話"] = ed_jargon
-                df.at[target_idx, "狀態"] = ed_status
-                df.to_csv(DB_FILE, index=False)
-                st.success("✅ 智庫數據已手動編修完成！系統已同步重啟更新。")
+if tab2:
+    with tab2:
+        st.header("🤖 LINE 對話大數據自動提煉")
+        c_d1, c_d2 = st.columns(2)
+        start_date = c_d1.date_input("分析開始日期", datetime.date(2026, 1, 1))
+        end_date = c_d2.date_input("分析結束日期", datetime.date(2026, 12, 31))
+        raw_chat = st.text_area("📋 貼上 LINE 對話", height=200)
+
+        if st.button("🚀 啟動 AI 提煉"):
+            if raw_chat.strip():
+                with st.spinner("AI 運算中，請稍候..."):
+                    try:
+                        genai.configure(api_key=GEMINI_KEY)
+                        model = genai.GenerativeModel('gemini-pro')
+                        prompt = f"""請分析以下對話，過濾閒聊，擷取 {start_date} 到 {end_date} 之間的有效實務。
+                        輸出嚴格 JSON 陣列：[{{"日期":"YYYY/MM/DD", "主題":"", "相關法規":"", "實務解決方案":"", "仲介常見行話":""}}]
+                        對話：{raw_chat}"""
+                        response = model.generate_content(prompt)
+                        st.session_state["parsed_data"] = json.loads(response.text.strip())
+                        st.success("✨ 分析完畢！請在下方進行人工審核。")
+                    except Exception as e:
+                        st.error(f"分析失敗: {e}")
+
+        if "parsed_data" in st.session_state and st.session_state["parsed_data"]:
+            st.write("---")
+            verified_list = []
+            for i, item in enumerate(st.session_state["parsed_data"]):
+                with st.expander(f"待確認 #{i+1}：{item.get('主題', '')}", expanded=True):
+                    v_date = st.text_input(f"日期 #{i+1}", item.get("日期", ""))
+                    v_topic = st.text_input(f"主題 #{i+1}", item.get("主題", ""))
+                    v_law = st.text_area(f"法規 #{i+1}", item.get("相關法規", ""))
+                    v_sol = st.text_area(f"對策 #{i+1}", item.get("實務解決方案", ""))
+                    v_jargon = st.text_input(f"行話 #{i+1}", item.get("仲介常見行話", ""))
+                    
+                    verified_list.append([
+                        str(int(datetime.datetime.now().timestamp()) + i),
+                        v_date, v_topic, v_law, v_sol, v_jargon, "有效", "" 
+                    ])
+            if st.button("💾 確認無誤，寫入資料庫"):
+                for row_data in verified_list:
+                    wks.append_row(row_data)
+                st.session_state["parsed_data"] = None
+                st.cache_resource.clear()
                 st.rerun()
 
-    st.write("---")
-    st.subheader("📥 2. 智庫核心數據安全備份區")
-    st.write("由於免費雲端主機重啟時會清空暫存資料，建議您每次大量新增或修改智庫後，點擊下方按鈕將大資料庫下載回電腦備份。")
-    
-    # 輸出成 CSV 下載按鈕
-    csv_buffer = df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 下載最新智慧智庫備份檔 (database.csv)",
-        data=csv_buffer,
-        file_name="migrant_worker_backup.csv",
-        mime="text/csv"
-    )
+# ==========================================
+# Tab 3: 智庫維護與附件上傳 (僅管理員)
+# ==========================================
+if tab3:
+    with tab3:
+        st.header("🛠️ 後台維護與建檔中心")
+        
+        # 區塊 A：新增與上傳
+        with st.expander("➕ 手動新增實務知識與上傳附件", expanded=True):
+            with st.form("manual_add_form", clear_on_submit=True):
+                n_date = st.date_input("日期", datetime.date.today())
+                n_topic = st.text_input("主題 (必填)")
+                n_law = st.text_area("相關法規")
+                n_sol = st.text_area("實務解決方案")
+                n_jargon = st.text_input("常見行話")
+                
+                st.write("📎 **上傳參考附件 (自動存入 Google Drive 📂人力仲介知識系統)**")
+                uploaded_file = st.file_uploader("選擇檔案 (PDF, Word, 圖片)", type=["pdf", "doc", "docx", "jpg", "png", "jpeg"])
+                
+                if st.form_submit_button("💾 新增並上傳") and n_topic:
+                    file_link = ""
+                    if uploaded_file:
+                        with st.spinner("檔案上傳中..."):
+                            file_meta = {'name': uploaded_file.name, 'parents': [DRIVE_FOLDER_ID]}
+                            media = MediaIoBaseUpload(io.BytesIO(uploaded_file.getvalue()), mimetype=uploaded_file.type, resumable=True)
+                            file_drive = drive_service.files().create(body=file_meta, media_body=media, fields='id, webViewLink').execute()
+                            drive_service.permissions().create(fileId=file_drive.get('id'), body={'type': 'anyone', 'role': 'reader'}).execute()
+                            file_link = file_drive.get('webViewLink')
+                            st.success("✅ 附件上傳成功！")
+
+                    new_id = str(int(datetime.datetime.now().timestamp()))
+                    wks.append_row([new_id, str(n_date), n_topic, n_law, n_sol, n_jargon, "有效", file_link])
+                    st.success("🎉 資料建檔完成！")
+                    st.cache_resource.clear()
+                    st.rerun()
+
+        st.write("---")
+        
+        # 區塊 B：修改與刪除
+        st.subheader("📝 編輯現現有資料")
+        active_df = df[df["狀態"] != "已刪除"] if not df.empty else df
+        if active_df.empty:
+            st.info("目前無資料。")
+        else:
+            edit_target = st.selectbox("🎯 選取要編輯的主題：", active_df["主題"].unique())
+            target_idx = df[df["主題"] == edit_target].index[0]
+            target_row = df.iloc[target_idx]
+            sheet_row_num = int(target_idx) + 2 
+            
+            with st.form("manual_edit_form"):
+                e_date = st.text_input("✍️ 修改日期", target_row["日期"])
+                e_topic = st.text_input("✍️ 修改主題", target_row["主題"])
+                e_law = st.text_area("✍️ 修改法規", target_row["相關法規"])
+                e_sol = st.text_area("✍️ 修改對策", target_row["實務解決方案"])
+                e_jargon = st.text_input("✍️ 修改行話", target_row["仲介常見行話"])
+                e_status = st.selectbox("🚨 狀態", ["有效", "過時標記", "已刪除"], index=["有效", "過時標記", "已刪除"].index(target_row["狀態"]))
+                e_link = st.text_input("🔗 附件網址", target_row.get("附件連結", ""))
+                
+                if st.form_submit_button("💾 儲存修改"):
+                    wks.update_cell(sheet_row_num, 2, e_date)
+                    wks.update_cell(sheet_row_num, 3, e_topic)
+                    wks.update_cell(sheet_row_num, 4, e_law)
+                    wks.update_cell(sheet_row_num, 5, e_sol)
+                    wks.update_cell(sheet_row_num, 6, e_jargon)
+                    wks.update_cell(sheet_row_num, 7, e_status)
+                    wks.update_cell(sheet_row_num, 8, e_link)
+                    st.success("✅ 修改完成！")
+                    st.cache_resource.clear()
+                    st.rerun()
