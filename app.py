@@ -59,7 +59,7 @@ def connect_google_services():
     
     # 試算表連線
     client_sheets = gspread.authorize(creds)
-    sheet_url = "https://docs.google.com/spreadsheets/d/1RyY0kOi09pydOo-xxTd9UGnLEujHm6Z6wc2R9hG4hLw/edit?usp=sharing" 
+    sheet_url = "https://docs.google.com/spreadsheets/d/1RyY0kOi09pydOo-xxTd9UGnLEujHm6Z6wc2R9hG4hLw/edit?usp=drive_link" 
     wks = client_sheets.open_by_url(sheet_url).sheet1
     
     # 雲端硬碟連線
