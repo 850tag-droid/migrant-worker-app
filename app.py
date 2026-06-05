@@ -148,7 +148,10 @@ if tab2:
                         prompt = f"""請分析以下對話，過濾閒聊，擷取 {start_date} 到 {end_date} 之間的有效實務。
                         輸出嚴格 JSON 陣列：[{{"日期":"YYYY/MM/DD", "主題":"", "相關法規":"", "實務解決方案":"", "仲介常見行話":""}}]
                         對話：{raw_chat}"""
-                        response = model.generate_content(prompt)
+                        response = model.generate_content(
+    prompt,
+    generation_config={"response_mime_type": "application/json"}
+)
                         st.session_state["parsed_data"] = json.loads(response.text.strip())
                         st.success("✨ 分析完畢！請在下方進行人工審核。")
                     except Exception as e:
