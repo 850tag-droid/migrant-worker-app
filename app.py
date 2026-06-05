@@ -144,7 +144,7 @@ if tab2:
                 with st.spinner("AI 運算中，請稍候..."):
                     try:
                         genai.configure(api_key=GEMINI_KEY)
-                        model = genai.GenerativeModel('gemini-pro')
+                        model = genai.GenerativeModel('gemini-3.5flash')
                         prompt = f"""請分析以下對話，過濾閒聊，擷取 {start_date} 到 {end_date} 之間的有效實務。
                         輸出嚴格 JSON 陣列：[{{"日期":"YYYY/MM/DD", "主題":"", "相關法規":"", "實務解決方案":"", "仲介常見行話":""}}]
                         對話：{raw_chat}"""
