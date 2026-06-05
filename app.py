@@ -70,6 +70,10 @@ try:
     wks, drive_service = connect_google_services()
     records = wks.get_all_records()
     df = pd.DataFrame(records) if records else pd.DataFrame(columns=["ID", "日期", "主題", "相關法規", "實務解決方案", "仲介常見行話", "狀態", "附件連結"])
+    
+    # ✨ 加上這行無敵防護罩：自動把所有標題旁邊的「隱形空白」通通刪掉！
+    df.columns = df.columns.str.strip()
+    
     df = df.astype(str).replace("nan", "")
 except Exception as e:
     st.error(f"❌ 無法連線至 Google 服務，請確認共用設定！錯誤原因: {e}")
